@@ -20,6 +20,7 @@ import torch
 
 # Truncate version number of nightly/local build of PyTorch to not cause exceptions with CodeFormer or Safetensors
 if ".dev" in torch.__version__ or "+git" in torch.__version__:
+    torch.__long_version__ = torch.__version__
     torch.__version__ = re.search(r'[\d.]+[\d]', torch.__version__).group(0)
 
 from modules import shared, devices, sd_samplers, upscaler, extensions, localization, ui_tempdir, ui_extra_networks
@@ -52,6 +53,9 @@ else:
 
 
 def check_versions():
+    if shared.cmd_opts.skip_version_check:
+        return
+
     expected_torch_version = "1.13.1"
 
     if version.parse(torch.__version__) < version.parse(expected_torch_version):
@@ -59,7 +63,10 @@ def check_versions():
 You are running torch {torch.__version__}.
 The program is tested to work with torch {expected_torch_version}.
 To reinstall the desired version, run with commandline flag --reinstall-torch.
-Beware that this will cause a lot of large files to be downloaded.
+Beware that this will cause a lot of large files to be downloaded, as well as
+there are reports of issues with training tab on the latest version.
+
+Use --skip-version-check commandline argument to disable this check.
         """.strip())
 
     expected_xformers_version = "0.0.16rc425"
@@ -71,6 +78,8 @@ Beware that this will cause a lot of large files to be downloaded.
 You are running xformers {xformers.__version__}.
 The program is tested to work with xformers {expected_xformers_version}.
 To reinstall the desired version, run with commandline flag --reinstall-xformers.
+
+Use --skip-version-check commandline argument to disable this check.
             """.strip())
 
 
@@ -89,7 +98,6 @@ def initialize():
     modules.sd_models.setup_model()
     codeformer.setup_model(cmd_opts.codeformer_models_path)
     gfpgan.setup_model(cmd_opts.gfpgan_models_path)
-    shared.face_restorers.append(modules.face_restoration.FaceRestoration())
 
     modelloader.list_builtin_upscalers()
     modules.scripts.load_scripts()
@@ -199,6 +207,14 @@ def webui():
         if cmd_opts.gradio_queue:
             shared.demo.queue(64)
 
+        gradio_auth_creds = []
+        if cmd_opts.gradio_auth:
+            gradio_auth_creds += cmd_opts.gradio_auth.strip('"').replace('\n', '').split(',')
+        if cmd_opts.gradio_auth_path:
+            with open(cmd_opts.gradio_auth_path, 'r', encoding="utf8") as file:
+                for line in file.readlines():
+                    gradio_auth_creds += [x.strip() for x in line.split(',')]
+
         app, local_url, share_url = shared.demo.launch(
             share=cmd_opts.share,
             server_name=server_name,
@@ -206,7 +222,7 @@ def webui():
             ssl_keyfile=cmd_opts.tls_keyfile,
             ssl_certfile=cmd_opts.tls_certfile,
             debug=cmd_opts.gradio_debug,
-            auth=[tuple(cred.split(':')) for cred in cmd_opts.gradio_auth.strip('"').split(',')] if cmd_opts.gradio_auth else None,
+            auth=[tuple(cred.split(':')) for cred in gradio_auth_creds] if gradio_auth_creds else None,
             inbrowser=cmd_opts.autolaunch,
             prevent_thread_lock=True
         )

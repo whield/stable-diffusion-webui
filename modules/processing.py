@@ -186,7 +186,7 @@ class StableDiffusionProcessing:
         return conditioning
 
     def edit_image_conditioning(self, source_image):
-        conditioning_image = self.sd_model.get_first_stage_encoding(self.sd_model.encode_first_stage(source_image))
+        conditioning_image = self.sd_model.encode_first_stage(source_image).mode()
 
         return conditioning_image
 
@@ -268,6 +268,7 @@ class Processed:
         self.height = p.height
         self.sampler_name = p.sampler_name
         self.cfg_scale = p.cfg_scale
+        self.image_cfg_scale = getattr(p, 'image_cfg_scale', None)
         self.steps = p.steps
         self.batch_size = p.batch_size
         self.restore_faces = p.restore_faces
@@ -445,6 +446,7 @@ def create_infotext(p, all_prompts, all_seeds, all_subseeds, comments=None, iter
         "Steps": p.steps,
         "Sampler": p.sampler_name,
         "CFG scale": p.cfg_scale,
+        "Image CFG scale": getattr(p, 'image_cfg_scale', None),
         "Seed": all_seeds[index],
         "Face restoration": (opts.face_restoration_model if p.restore_faces else None),
         "Size": f"{p.width}x{p.height}",
@@ -455,7 +457,6 @@ def create_infotext(p, all_prompts, all_seeds, all_subseeds, comments=None, iter
         "Seed resize from": (None if p.seed_resize_from_w == 0 or p.seed_resize_from_h == 0 else f"{p.seed_resize_from_w}x{p.seed_resize_from_h}"),
         "Denoising strength": getattr(p, 'denoising_strength', None),
         "Conditional mask weight": getattr(p, "inpainting_mask_weight", shared.opts.inpainting_mask_weight) if p.is_using_inpainting_conditioning else None,
-        "Eta": (None if p.sampler is None or p.sampler.eta == p.sampler.default_eta else p.sampler.eta),
         "Clip skip": None if clip_skip <= 1 else clip_skip,
         "ENSD": None if opts.eta_noise_seed_delta == 0 else opts.eta_noise_seed_delta,
     }
@@ -542,8 +543,6 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
     if os.path.exists(cmd_opts.embeddings_dir) and not p.do_not_reload_embeddings:
         model_hijack.embedding_db.load_textual_inversion_embeddings()
 
-    _, extra_network_data = extra_networks.parse_prompts(p.all_prompts[0:1])
-
     if p.scripts is not None:
         p.scripts.process(p)
 
@@ -581,13 +580,6 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
             if shared.opts.live_previews_enable and opts.show_progress_type == "Approx NN":
                 sd_vae_approx.model()
 
-            if not p.disable_extra_networks:
-                extra_networks.activate(p, extra_network_data)
-
-        with open(os.path.join(paths.data_path, "params.txt"), "w", encoding="utf8") as file:
-            processed = Processed(p, [], p.seed, "")
-            file.write(processed.infotext(p, 0))
-
         if state.job_count == -1:
             state.job_count = p.n_iter
 
@@ -608,10 +600,23 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
             if len(prompts) == 0:
                 break
 
-            prompts, _ = extra_networks.parse_prompts(prompts)
+            prompts, extra_network_data = extra_networks.parse_prompts(prompts)
+
+            if not p.disable_extra_networks:
+                with devices.autocast():
+                    extra_networks.activate(p, extra_network_data)
 
             if p.scripts is not None:
                 p.scripts.process_batch(p, batch_number=n, prompts=prompts, seeds=seeds, subseeds=subseeds)
+
+            # params.txt should be saved after scripts.process_batch, since the
+            # infotext could be modified by that callback
+            # Example: a wildcard processed by process_batch sets an extra model
+            # strength, which is saved as "Model Strength: 1.0" in the infotext
+            if n == 0:
+                with open(os.path.join(paths.data_path, "params.txt"), "w", encoding="utf8") as file:
+                    processed = Processed(p, [], p.seed, "")
+                    file.write(processed.infotext(p, 0))
 
             uc = get_conds_with_caching(prompt_parser.get_learned_conditioning, negative_prompts, p.steps, cached_uc)
             c = get_conds_with_caching(prompt_parser.get_multicond_learned_conditioning, prompts, p.steps, cached_c)
@@ -902,12 +907,13 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
 class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
     sampler = None
 
-    def __init__(self, init_images: list = None, resize_mode: int = 0, denoising_strength: float = 0.75, mask: Any = None, mask_blur: int = 4, inpainting_fill: int = 0, inpaint_full_res: bool = True, inpaint_full_res_padding: int = 0, inpainting_mask_invert: int = 0, initial_noise_multiplier: float = None, **kwargs):
+    def __init__(self, init_images: list = None, resize_mode: int = 0, denoising_strength: float = 0.75, image_cfg_scale: float = None, mask: Any = None, mask_blur: int = 4, inpainting_fill: int = 0, inpaint_full_res: bool = True, inpaint_full_res_padding: int = 0, inpainting_mask_invert: int = 0, initial_noise_multiplier: float = None, **kwargs):
         super().__init__(**kwargs)
 
         self.init_images = init_images
         self.resize_mode: int = resize_mode
         self.denoising_strength: float = denoising_strength
+        self.image_cfg_scale: float = image_cfg_scale if shared.sd_model.cond_stage_key == "edit" else None
         self.init_latent = None
         self.image_mask = mask
         self.latent_mask = None
